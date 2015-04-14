@@ -2,17 +2,25 @@ package com.jackyfan.netty.pio;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelProgressiveFuture;
+import io.netty.channel.ChannelProgressiveFutureListener;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaderUtil;
+import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.handler.stream.ChunkedFile;
 import io.netty.util.CharsetUtil;
 
 import java.io.File;
@@ -27,6 +35,7 @@ import javax.activation.MimetypesFileTypeMap;
 public class HttpFileServerHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
 	private final String url;
 	private static final Pattern INSERCURE_URI = Pattern.compile(".*[<>&\"].*");
+	private static final Pattern ALLOWED_FILE_NAME = Pattern.compile("[A-Za-z0-9][-_A-Za-z0-9\\.]*");
 
 	public HttpFileServerHandler(String url) {
 		this.url = url;
@@ -64,10 +73,47 @@ public class HttpFileServerHandler extends SimpleChannelInboundHandler<FullHttpR
 		}
 		RandomAccessFile rFile = null;
 		try {
-			rFile=new RandomAccessFile(file,"r");
+			rFile = new RandomAccessFile(file, "r");
 		} catch (FileNotFoundException e) {
-			sendError(ctx,HttpResponseStatus.NOT_FOUND);
+			sendError(ctx, HttpResponseStatus.NOT_FOUND);
+			return;
 		}
+		long fLength = rFile.length();
+		HttpResponse resp = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+
+		HttpHeaderUtil.setContentLength(resp, fLength);
+		resp.headers().setLong(HttpHeaderNames.CONTENT_LENGTH, fLength);
+		// setContentLength(resp,fLength);
+		setContentTypeHeader(resp, file);
+		if (HttpHeaderUtil.isKeepAlive(resp)) {
+			resp.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
+		}
+		// 发送头信息到通道
+		ctx.write(resp);
+		ChannelFuture sendFuture;
+		// 发送问价到通道
+		sendFuture = ctx.write(new ChunkedFile(rFile, 0, fLength, 8192), ctx.newProgressivePromise());
+		// 添加文件发送进度
+		sendFuture.addListener(new ChannelProgressiveFutureListener() {
+
+			public void operationComplete(ChannelProgressiveFuture future) throws Exception {
+				System.out.println("Transfer complete.");
+			}
+
+			public void operationProgressed(ChannelProgressiveFuture future, long progress, long total)
+					throws Exception {
+				if (total < 0) {
+					System.out.println("Transfer progress:" + progress);
+				} else {
+					System.out.println("Transfer progress:" + progress + "/" + total);
+				}
+			}
+		});
+		ChannelFuture lastChannel = ctx.writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
+		if (!HttpHeaderUtil.isKeepAlive(resp)) {
+			lastChannel.addListener(ChannelFutureListener.CLOSE);
+		}
+
 	}
 
 	private String sanitizeUri(String uri) {
@@ -91,7 +137,7 @@ public class HttpFileServerHandler extends SimpleChannelInboundHandler<FullHttpR
 				|| uri.contains(File.separator + '.') || INSERCURE_URI.matcher(uri).matches()) {
 			return null;
 		}
-		return System.getProperty("user.dir") + File.separator + uri;
+		return System.getProperty("user.dir") + uri;
 	}
 
 	private static final void sendListing(ChannelHandlerContext ctx, File dir) {
@@ -115,6 +161,9 @@ public class HttpFileServerHandler extends SimpleChannelInboundHandler<FullHttpR
 				continue;
 			}
 			name = f.getName();
+			if (!ALLOWED_FILE_NAME.matcher(name).matches()) {
+				continue;
+			}
 			sb.append("<li>链接：<a href=\"");
 			sb.append(name);
 			sb.append("\">");

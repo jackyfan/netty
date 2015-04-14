@@ -56,7 +56,7 @@ public class HttpFileServer {
 
 	public static void main(String[] args) throws Exception {
 		int port = 8080;
-		String url = "src/com/jackyfan/netty";
+		String url = "/src/main/java/com/jackyfan/netty";
 		new HttpFileServer().run(port, url);
 
 	}
